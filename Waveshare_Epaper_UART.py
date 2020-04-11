@@ -1,209 +1,525 @@
-#!/usr/bin/env python
-# coding: utf-8
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import struct
+# Copyright (c) 2018 Not a Bird
+# Copyright (c) 2019 Jarret Dyrbye
+# Distributed under the MIT software license, see the accompanying
+# file LICENSE or http://www.opensource.org/licenses/mit-license.php
+
+
 import time
+import struct
 import serial
 
-FONT_SIZE_32 = 0x01
-FONT_SIZE_48 = 0x02
-FONT_SIZE_64 = 0x03
 
-MEM_FLASH   = 0x00
-MEM_SD      = 0x01
+###############################################################################
+# base command class
+###############################################################################
 
-ROTATION_NORMAL = 0x00
-ROTATION_180    = 0x01
+class Command(object):
+    '''
+    Commands used by the e ink display have a certain format that easily lends
+    itself to objectification, so this is the base class for those commands.
 
-# commands
-CMD_HANDSHAKE       = 0x00  # handshake
-CMD_SET_MEMORY      = 0x07  # get memory mode
-CMD_SET_ROTATION    = 0x0d
-CMD_UPDATE          = 0x0A  # update
-CMD_LOAD_FONT       = 0x0E  # copy font files from SD card to NandFlash.
-                            # Font files include GBK32/48/64.FON
-                            # 48MB allocated in NandFlash for fonts
-                            # LED will flicker 3 times when starts and ends.
-CMD_LOAD_PIC        = 0x0F  # Import the image files from SD card to the NandFlash.
-                            # LED will flicker 3 times when starts and ends.
-                            # 80MB allocated in NandFlash for images
-CMD_SET_COLOR       = 0x10  # set colour
-CMD_SET_EN_FONT     = 0x1E  # set English font
-CMD_SET_CH_FONT     = 0x1F  # set Chinese font
+    Child classes should only need to call the constructor of this class and
+    provide the new command and data content.
+    '''
 
-CMD_DRAW_LINE       = 0x22  # draw line
-CMD_CLEAR           = 0x2E  # clear screen use back colour
-CMD_DRAW_STRING     = 0x30  # draw string
-CMD_DRAW_BITMAP     = 0x70  # draw bitmap
+    FRAME_HEADER = b'\xa5'
+    FRAME_FOOTER = b'\xcc\x33\xc3\x3c'
+    HEADER_LENGTH = 1
+    COMMAND_LENGTH = 1
+    LENGTH_LENGTH = 2
+    FOOTER_LENGTH = 4
+    CHECK_LENGTH = 1
+    COMMAND = b'\x00'
+    RESPONSE_BYTES = 0
 
-COLOR_BLACK         = 0x00
-COLOR_DARK_GRAY     = 0x01
-COLOR_GRAY          = 0x02
-COLOR_WHITE         = 0x03
+    def __init__(self, command=None, data=None):
+        self.command = command or self.COMMAND
+        self.bytes = data or []
 
-EPAPER_SLEEP        = 0x08
+    def calculate_length(self):
+        '''
+        Calculate the total length of the packet and returns it as a number
+        (*NOT* formatted like the packet requires!).
+        '''
+        return (Command.HEADER_LENGTH + Command.LENGTH_LENGTH +
+                Command.COMMAND_LENGTH + len(self.bytes) +
+                Command.FOOTER_LENGTH + Command.CHECK_LENGTH)
 
-class Screen(object):
-    def __init__(self, tty):                #constructor 构造函数Screen类的实例初始化
-        self.tty = tty                      #比如创建一个Screen类的实例 epd=Screen(tty123) 以为着epd.tty=tty123
-        self.socket = None
+    def calculate_checksum(self, data):
+        '''
+        Creates a checksum by xor-ing every byte of (byte string) data.
+        '''
+        checksum = 0
+        for byte in data:
+            checksum = checksum ^ byte
+        return checksum.to_bytes(1, byteorder='big')
 
-    @staticmethod
-    def _build_frame(cmd, args=None):
-        length = 9
-        if args:
-            length += len(args)
-        frame = '\xA5' + struct.pack('>h', length) + chr(cmd)
-        if args:
-            frame += args
-        frame += '\xCC\x33\xC3\x3C'
-        parity = 0x00
-        for i in xrange(0, len(frame)):
-            parity ^= ord(frame[i])
-        frame += chr(parity)
-        return frame
+    def convert_bytes(self):
+        '''
+        Conver the internal bytes into a string, not the human readable sort,
+        but the sort to be used by the protocol.
+        '''
+        return (b''.join(self.bytes) if isinstance(self.bytes, list) else
+                self.bytes)
 
-    def _send(self, frame):
-        self.socket.write(frame)
-        self.socket.flushInput();
-        return self.socket.read(self.socket.inWaiting())
-        '''这里有bug,不能都指定读取10个字节数据,会造成异常'''
-        #return self.socket.read(10)
+    def _encode_packet(self):
+        '''
+        Encodes and returns the entire packet in a format that is suitable for
+        transmitting over the serial connection.
+        '''
+        return (Command.FRAME_HEADER +
+                struct.pack('>H', self.calculate_length()) + self.command +
+                self.convert_bytes() + Command.FRAME_FOOTER)
 
-    def connect(self):
-        self.socket = serial.Serial(port=self.tty,
-                                    baudrate=115200,
-                                    stopbits=serial.STOPBITS_ONE,
-                                    bytesize=serial.EIGHTBITS,
-                                    timeout=0.5)
+    def encode(self):
+        '''
+        Encodes the packet and attaches the checksum.
+        '''
+        packet = self._encode_packet()
+        return packet + self.calculate_checksum(packet)
 
-    def disconnect(self):
-        self.socket.close()
+    def __repr__(self):
+        '''
+        Returns a human readable string of hex digits corresponding to the
+        encoded full packet content.
+        '''
+        return u' '.join([u'%02x' % ord(b) for b in self.encode()])
 
-    def sleep(self):
-        self._send(self._build_frame(EPAPER_SLEEP))
 
-    def handshake(self):
-        self._send(self._build_frame(CMD_HANDSHAKE))
+###############################################################################
+# Configuration commands
+###############################################################################
 
-    def set_memory(self, mem):
-        self._send(self._build_frame(CMD_SET_MEMORY, chr(mem)))
 
-    def set_rotation(self, r):
-        self._send(self._build_frame(CMD_SET_ROTATION, chr(r)))
+class Handshake(Command):
+    '''
+    Handshake or Null command.
 
-    def clear(self):
-        self._send(self._build_frame(CMD_CLEAR))
+    From the wiki:
+
+    > Handshake command. If the module is ready, it will return an "OK".
+
+    '''
+    RESPONSE_BYTES = 0
+
+class SetBaudrate(Command):
+    '''
+    From the wiki:
+
+    Set the serial Baud rate.
+
+    After powered[sic] up, the default Baud rate is 115200. This command is
+    used to set the Baud rate. You may need to wait 100ms for the module to
+    return the result after sending this command, since the host may take a
+    period of time to change its Baud rate.
+    '''
+    COMMAND = b'\x01'
+    RESPONSE_BYTES = 2
+
+    def __init__(self, baud):
+        super().__init__(SetBaudrate.COMMAND, struct.pack('>L', baud))
+
+
+class ReadBaudrate(Command):
+    '''
+    From the wiki:
+
+    Return the current Baud rate value in ASCII format.
+
+    '''
+    COMMAND = b'\x02'
+    RESPONSE_BYTES = 6
+
+
+class ReadStorageMode(Command):
+    '''
+    From the wiki:
+    Return the information about the currently used storage area.
+
+    0: NandFlash
+
+    1: MicroSD
+    '''
+    COMMAND = b'\x06'
+
+
+class SetStorageMode(Command):
+    '''
+    From the wiki:
+
+    Set the storage area to select the storage locations of font library and
+    images, either the external TF card or the internal NandFlash is available.
+    '''
+    COMMAND = b'\x07'
+    NAND_MODE = b'\x00'
+    TF_MODE = b'\x01'
+
+    def __init__(self, target=NAND_MODE):
+        super().__init__(SetStorageMode.COMMAND, data=[target])
+
+
+class SleepMode(Command):
+    '''
+    GPIO must be used to wake it back up.
+
+    From the wiki:
+    The system will enter the sleep mode and reduce system power consumption by
+    this command. Under sleep mode, the state indicator is off, and the system
+    does not respond any commands. Only the rising edge on the pin WAKE_UP can
+    wake up the system.
+    '''
+    COMMAND = b'\x08'
+
+
+class RefreshAndUpdate(Command):
+    '''
+    From the wiki:
+    Refresh and update the display at once.
+    '''
+    COMMAND = b'\x0a'
+    RESPONSE_BYTES = 2
+
+
+class CurrentDisplayRotation(Command):
+    '''
+    From the wiki:
+    Return the current display direction
+
+    0: Normal
+
+    1 or 2: 180° rotation (depending on Firmware)
+    '''
+    COMMAND = b'\x0c'
+
+
+class SetCurrentDisplayRotation(Command):
+    '''
+    From the wiki:
+    Set the display direction, only 180° rotation display supported.
+
+    0x00: Normal
+
+    0x01 or 0x02: 180° rotation (depending on Firmware)
+    '''
+    COMMAND = b'\x0d'
+    RESPONSE_BYTES = 2
+
+    NORMAL = b'\x00'
+    FLIP = b'\x01'
+    FLIPB = b'\x02' # depending on firmware, value could be this...
+    def __init__(self, rotation=NORMAL):
+        super().__init__( SetCurrentDisplayRotation.COMMAND, rotation)
+
+
+class ImportFontLibrary(Command):
+    '''
+    From the wiki:
+    Import font library: 48MB
+
+    Import the font library files from the TF card to the internal NandFlash.
+    The font library files include GBK32.FON/GBK48.FON/GBK64.FON. The state
+    indicator will flicker 3 times when the importation is start and ending.
+    '''
+    COMMAND = b'\x0e'
+
+
+class ImportImage(Command):
+    '''
+    From the wiki:
+    Import image: 80MB
+    '''
+    COMMAND = b'\x0f'
+    def __init__(self):
+        super().__init__(ImportImage.COMMAND)
+
+
+class SetPallet(Command):
+    '''
+    From the wiki:
+    Set the foreground color and the background color on drawing, in which the
+    foreground color can be used to display the basic drawings and text, while
+    the background color is used to clear the screen.
+    '''
+    COMMAND = b'\x10'
+    RESPONSE_BYTES = 2
+
+    BLACK = b'\x00'
+    DARK_GRAY = b'\x01'
+    LIGHT_GRAY = b'\x02'
+    WHITE = b'\x03'
+    def __init__(self, fg=BLACK, bg=WHITE):
+        fg = fg or SetPallet.BLACK
+        bg = bg or SetPallet.WHITE
+        super().__init__(SetPallet.COMMAND, [fg, bg])
+
+
+class GetPallet(Command):
+    '''
+    From the wiki:
+    For example, when returns "03", "0" means the foreground color is Black and
+    "3" means the background color is White.
+    '''
+    COMMAND = b'\x11'
+
+
+class SetFontSize(Command):
+    '''
+    Common parent for font size setting commands.
+    '''
+    THIRTYTWO = b'\x01'
+    FOURTYEIGHT = b'\x02'
+    SIXTYFOUR = b'\x03'
+    RESPONSE_BYTES = 2
+    def __init__(self, command, size=THIRTYTWO):
+        super().__init__(command, [size])
+
+
+class SetEnFontSize(SetFontSize):
+    '''
+    From the wiki:
+    Set the English font size (0x1E or 0x1F, may differ depending on version).
+    '''
+    COMMAND = b'\x1e'
+    RESPONSE_BYTES = 2
+    def __init__(self, size=SetFontSize.THIRTYTWO):
+        super().__init__(SetEnFontSize.COMMAND, size)
+
+
+class SetZhFontSize(SetFontSize):
+    '''
+    From the wiki:
+    Set the Chinese font size (0x1F).
+    '''
+    COMMAND = b'\x1f'
+    RESPONSE_BYTES = 2
+    def __init__(self, size=SetEnFontSize.THIRTYTWO):
+        super().__init__(SetZhFontSize.COMMAND, size)
+
+
+###############################################################################
+# Draw a pre-configured thing
+###############################################################################
+
+class DisplayText(Command):
+    '''
+    Any text to display needs to be GB2312 encoded.  For example:
+
+        DisplayText(10, 10, u'你好World'.encode('gb2312'))
+
+    From the wiki:
+    Display a character string on a specified coordination position. Chinese
+    and English mixed display is supported.
+    '''
+    COMMAND = b'\x30'
+    RESPONSE_BYTES = 2
+    def __init__(self, x, y, text):
+        super().__init__(self.COMMAND,
+                         struct.pack(">HH", x, y) + text + b'\x00')
+
+class DisplayImage(Command):
+    '''
+    From the wiki:
+    Before executing this command, please make sure the bitmap file you want to
+    display is stored in the storage area (either TF card or internal
+    NandFlash).
+
+    Example: A5 00 16 70 00 00 00 00 50 49 43 37 2E 42 4D 50 00 CC 33 C3 3C DF
+
+    Descriptions: Image start coordination position: (0x00, 0x00)
+
+    0x50 49 43 37 2E 42 4D 50: Bitmap name: PIC7.BMP
+
+    Each character string should be end with a "0". So, you should add a "00"
+    at the end of the string 50 49 43 37 2E 42 4D 50.
+
+    The name of the bitmap file should be in uppercase English character(s).
+    And the string length of the bitmap name should be less than 11 characters,
+    in which the ending "0" is included. For example, PIC7.BMP and PIC789.BMP
+    are correct bitmap names, while PIC7890.BMP is a wrong bitmap namem.
+    '''
+    COMMAND = b'\x70'
+    RESPONSE_BYTES = 2
+    def __init__(self, x, y, text):
+        super().__init__(self.COMMAND,
+                         struct.pack(">HH", x, y) + text + b'\x00')
+
+
+###############################################################################
+# Draw shapes
+###############################################################################
+
+class DrawLine(Command):
+    '''
+    From the wiki:
+    Draw a Line according to two point coordinates with foreground color,
+    in which these two points serve as the end points of the Line.
+    '''
+    COMMAND = b'\x22'
+    RESPONSE_BYTES = 2
+    def __init__(self, x1, y1, x2, y2):
+        super().__init__(self.COMMAND, struct.pack(">HHHH", x1, y1, x2, y2))
+
+
+class DrawCircle(Command):
+    '''
+    From the wiki:
+    Draw a circle based on the given center coordination and radius.
+    '''
+    COMMAND = b'\x26'
+    RESPONSE_BYTES = 2
+    def __init__(self, x, y, radius):
+        super().__init__(self.COMMAND, struct.pack(">HHH", x, y, radius))
+
+
+class FillCircle(DrawCircle):
+    '''
+    From the wiki:
+    Fill a circle based on the given center coordination and radius.
+    '''
+    COMMAND = b'\x27'
+    RESPONSE_BYTES = 2
+
+
+class DrawTriangle(Command):
+    '''
+    From the wiki:
+    Draw a tri-angle according to three given point coordinates.
+    '''
+    COMMAND = b'\x28'
+    RESPONSE_BYTES = 2
+    def __init__(self, x1, y1, x2, y2, x3, y3):
+        super().__init__(self.COMMAND, struct.pack(">HHHHHH", x1, y1, x2, y2,
+                                                   x3, y3))
+
+
+class FillTriangle(DrawTriangle):
+    '''
+    From the wiki:
+    Fill a tri-angle according to three given point coordinates.
+    '''
+    COMMAND = b'\x29'
+    RESPONSE_BYTES = 2
+
+
+class DrawRectangle(Command):
+    '''
+    From the wiki:
+    Draw a rectangle according to two point coordinates with foreground color,
+    in which these two points serve as the diagonal points of the rectangle.
+    '''
+    COMMAND = b'\x25'
+    RESPONSE_BYTES = 2
+    def __init__(self, x1, y1, x2, y2):
+        super().__init__(self.COMMAND, struct.pack(">HHHH", x1, y1, x2, y2))
+
+
+class FillRectangle(DrawRectangle):
+    '''
+    From the wiki:
+    Draw a rectangle according to two point coordinates with foreground color,
+    in which these two points serve as the diagonal points of the rectangle.
+    '''
+    COMMAND = b'\x24'
+    RESPONSE_BYTES = 2
+
+
+class ClearScreen(Command):
+    '''
+    From the wiki:
+    Clear the screen with the background color.
+    '''
+    COMMAND = b'\x2e'
+    RESPONSE_BYTES = 2
+
+
+###############################################################################
+# Epaper object
+###############################################################################
+
+# These correspond to the board pins used on the PI3:
+#PORT_DEVICE = "/dev/ttyS2"
+PIN_RESET = 3
+PIN_WAKEUP = 7
+
+RESPONSE_READ_THRESHOLD = 600
+
+class EPaper(object):
+    '''
+    This is a class to make interacting with the 4.3inch e-Paper UART Module
+    easier.
+
+    See https://www.waveshare.com/wiki/4.3inch_e-Paper_UART_Module#Serial_port
+    for more info.
+    '''
+    def __init__(self, port):
+        '''
+        Makes an EPaper object that will read and write from the specified
+        serial device (file name).
+
+        Note: This class makes use of the Raspberry PI GPIO functions, the
+        caller should invoke GPIO.cleanup() before exiting.
+
+        @param port The file name to open.
+        @param reset The GPIO pin to use for resets.
+        @param wakeup The GPIO pin to use for wakeups.
+        @param mode The mode of GPIO pin addressing (GPIO.BOARD is the default).
+        '''
+        self.serial = serial.Serial(port)
+        self.serial.baudrate = 115200 # default for device
+        self.serial.bytesize = serial.EIGHTBITS
+        self.serial.parity = serial.PARITY_NONE
+        self.bytes_expected = 0
+
+    def __enter__(self):
+        '''
+        So the EPaper class can be used in a with clause and
+        handle cleaning up the GPIO stuff on exit.  It returns itself.
+        '''
+        return self
+
+    def __exit__(self ,type, value, traceback):
+        '''
+        Invokes the GPIO.cleanup() method.  If that's not a desired behavior,
+        don't use the with clause.
+        '''
 
     def update(self):
-        self._send(self._build_frame(CMD_UPDATE))
+        '''
+        Update the display.
+        '''
+        self.serial.write(RefreshAndUpdate().encode())
 
-    def line(self, x0, y0, x1, y1):
-        args = struct.pack('>hhhh', x0, y0, x1, y1)
-        self._send(self._build_frame(CMD_DRAW_LINE, args))
+    def send(self, command):
+        '''
+        Send the provided command to the device, does not wait for a response
+        or sleep or make any other considerations.
+        '''
+        self.bytes_expected += command.RESPONSE_BYTES
+        self.serial.write(command.encode())
+        if self.bytes_expected >= RESPONSE_READ_THRESHOLD:
+            self.read_responses()
 
-    def set_color(self, front, background):
-        self._send(self._build_frame(CMD_SET_COLOR, chr(front) + chr(background)))
+    def read(self, size=100, timeout=5):
+        '''
+        Read a response from the underlying serial device.
+        '''
+        start_time = time.time()
+        self.serial.timeout = timeout
+        b = self.serial.read(size)
+        #print("read took %0.2f seconds. expected: %d got: %d data: %s" % (
+        #    time.time() - start_time, size, len(b), b.hex()))
+        return b
 
-    def set_en_font_size(self, size):
-        self._send(self._build_frame(CMD_SET_EN_FONT, chr(size)))
-
-    def set_ch_font_size(self, size):
-        self._send(self._build_frame(CMD_SET_CH_FONT, chr(size)))
-
-    @staticmethod
-    def _get_real_font_size(font_size):
-        return [0, 32, 48, 64][font_size]
-
-    def get_text_width(self, txt, size=FONT_SIZE_32):
-        size = self._get_real_font_size(size)
-        width = 0
-        for c in txt:
-            if c in "'":
-                width += 5
-            elif c in "ijl|":
-                width += 6
-            elif c in "f":
-                width += 7
-            elif c in " It![].,;:/\\":
-                width += 8
-            elif c in "r-`(){}":
-                width += 9
-            elif c in '"':
-                width += 10
-            elif c in "*":
-                width += 11
-            elif c in "x^":
-                width += 12
-            elif c in "Jvz":
-                width += 13
-            elif c in "cksy":
-                width += 14
-            elif c in "Labdeghnopqu$#?_1234567890":
-                width += 15
-            elif c in "T+<>=~":
-                width += 16
-            elif c in "FPVXZ":
-                width += 17
-            elif c in "ABEKSY&":
-                width += 18
-            elif c in "HNUw":
-                width += 19
-            elif c in "CDR":
-                width += 20
-            elif c in "GOQ":
-                width += 21
-            elif c in "m":
-                width += 22
-            elif c in "M":
-                width += 23
-            elif c in "%":
-                width += 24
-            elif c in "@":
-                width += 27
-            elif c in "W":
-                width += 28
-            else:  # non-ascii or Chinese character
-                width += 32
-        return int(width * (size / 32.0))
-
-    def text(self, x0, y0, text):
-        args = struct.pack('>hh', x0, y0)
-        if isinstance(text, str):
-            text = text.decode('utf-8')
-        args += text.encode('GB18030') + '\x00'
-        self._send(self._build_frame(CMD_DRAW_STRING, args))
-
-    def wrap_text(self, x0, y0, limit, text, font_size=FONT_SIZE_32, line_space=10):
-
-        line_height = self._get_real_font_size(font_size)
-        line = ''
-        width = 0
-        cy = y0
-
-        if not isinstance(text, unicode):
-            text = text.decode('utf-8')
-
-        for c in text:
-            line += c
-            width += self.get_text_width(c, font_size)
-            if width + font_size * 32 > limit:
-                self.text(x0, cy, line)
-                cy += line_height + line_space
-                line = ''
-                width = 0
-
-        if line:
-            self.text(x0, cy, line)
-
-    def load_pic(self):
-        self._send(self._build_frame(CMD_LOAD_PIC))
-    def load_font(self):
-        self._send(self._build_frame(CMD_LOAD_FONT))
-
-    def bitmap(self, x0, y0, image):
-        if isinstance(image, str):
-            image = image.decode('utf-8')
-        args = struct.pack('>hh', x0, y0)
-        args = args + image.encode('ascii') + '\x00'
-        self._send(self._build_frame(CMD_DRAW_BITMAP, args))
+    def read_responses(self, timeout=3):
+        if self.bytes_expected == 0:
+            print("no response expected")
+            return
+        start_time = time.time()
+        #print("reading expected response bytes: %d" % self.bytes_expected)
+        b = self.read(size=self.bytes_expected, timeout=timeout)
+        #print("read: %d, read time: %0.2f" % (len(b),
+        #                                      time.time() - start_time))
+        self.bytes_expected -= len(b)

@@ -1,0 +1,3 @@
+requests==2.23.0
+pyserial==3.4
+w1thermsensor==1.3.0

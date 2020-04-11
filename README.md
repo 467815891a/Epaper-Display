@@ -1,5 +1,16 @@
 ## Epaper-Display
 
+### How to use
+
+`sudo apt update && sudo apt install -y python3-wheel python3-pip python3-setuptools python3-psutil`
+ 
+`git clone https://github.com/467815891a/Epaper-Display.git && cd Epaper-Display && sudo pip3 install -r requirements.txt` 
+
+Then you can test the script by using `python3 main.py` 
+
+And I also have a `epaper.service` file for systemd, you can change the script path in the `epaper.service` and enable the service by using 
+
+`sudo cp epaper.service /etc/systemd/system && sudo systemctl daemon-reload && sudo systemctl enable epaper.service` 
 
 #### v1.3
 - Countdown function added back.

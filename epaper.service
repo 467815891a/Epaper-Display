@@ -1,0 +1,16 @@
+[Unit]
+Description=Epaper Service
+After=network-online.target
+Conflicts=getty@tty1.service
+
+[Service]
+User=root
+WorkingDirectory=/root/Epaper-Display/
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /root/Epaper-Display/main.py
+Restart=always
+RestartSec=3
+Type=idle
+
+[Install]
+WantedBy=multi-user.target
