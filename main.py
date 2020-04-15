@@ -165,10 +165,10 @@ class Quotes():
     def display_quotes(self):
         paper.send(SetEnFontSize(SetEnFontSize.THIRTYTWO))
         for i in range(len(self.__english)):
-            paper.send(DisplayText(255,410 + i*35, self.__english[i].encode("GB18030")))
+            paper.send(DisplayText(255,410 + i*35, self.__english[i].encode("GB18030", "ignore")))
         if self.__chinese is not None:
             for j in range(len(self.__chinese)):
-                paper.send(DisplayText(250,455 + i*35 + j*35 , self.__chinese[j].encode("GB18030")))
+                paper.send(DisplayText(250,455 + i*35 + j*35 , self.__chinese[j].encode("GB18030"," ignore")))
 
 
 def update_sensor():
