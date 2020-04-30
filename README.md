@@ -23,7 +23,7 @@ And I also have a `epaper.service` file for systemd, you can change the script p
 
 ##### Layout
 
-<img src="EPD_layout.png" width="480" height="320" />
+<img src="EPD_layout.png" width="1080" height="813" />
 
 17 March 2018
 
